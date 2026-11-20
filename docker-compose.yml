@@ -1,0 +1,23 @@
+services:
+  gateway:
+    build: .
+    image: game-gateway:latest
+    container_name: game-gateway
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      JWT_TTL_SECS: ${JWT_TTL_SECS:-7200}
+      MAX_PLAYERS_DEFAULT: ${MAX_PLAYERS_DEFAULT:-8}
+      MAX_CONNECTIONS_PER_IDENTITY: ${MAX_CONNECTIONS_PER_IDENTITY:-4}
+      WS_IDLE_TIMEOUT_SECS: ${WS_IDLE_TIMEOUT_SECS:-120}
+      RUST_LOG: ${RUST_LOG:-info}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

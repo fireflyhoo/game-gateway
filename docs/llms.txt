@@ -1,0 +1,33 @@
+# game-gateway
+
+> Web 联机游戏通用后端：一套服务同时提供 REST API 与 WebSocket 实时通道。服务端不解释游戏玩法，只做房间/连接管理与事件透传；用 JWT 的 game 字段隔离多个游戏。
+
+本文件遵循 llmstxt.org 约定，是 AI 客户端发现本服务能力的入口。文档由服务本身运行时提供，URL 均为相对当前服务根地址的绝对路径。
+
+## 开始接入（AI 请先读这些）
+
+- [AI 接入指南](/ai/guide): 自包含的完整接入文档，含可直接使用的代码示例。读完即可编写客户端。
+- [机器可读能力清单](/ai/manifest.json): JSON 格式，列出全部 REST 端点、WS 消息类型与 payload、数据模型、错误码、典型流程。
+- [OpenAPI 3.1 规范](/ai/openapi.json): 标准 REST API 描述，可直接导入 API 工具链。
+
+## 发现与状态
+
+- [服务信息与发现指针](/api/v1/info): 版本、在线统计，以及全部自描述端点列表。建议第一步访问。
+- [实例能力状态](/ai/capabilities): 当前运行的实际配置与开关（dev-token 是否启用、各项限制）。
+- [根发现文档](/): JSON，列出所有自描述资源。
+- [本文件](/llms.txt): AI 入口清单。
+
+## 健康检查
+
+- [Health](/health): 返回 status=healthy。
+
+## 给 AI 的关键说明
+
+- WebSocket 端点: `/ws?token=<JWT>`。浏览器 WS 无法设置自定义 Header，token 必须放 query。
+- 所有 WS 消息结构: `{ "t": "类型", "payload": {}, "rid": "可选" }`。
+- 游戏事件: 发送 `{ "t": "game", "payload": { "event": "自定义事件名", "data": 任意JSON } }`，服务端原样转发给房间其他人。
+- 房间管理（房主专用）: `room_kick`/`room_ban`/`room_unban`，payload `{ "target": "对方identity" }`，用于踢人/封禁/解封。
+- 加密码房间: 创建时带 `password`，加入时 `room_join` 带 `{ "room": "id", "password": "..." }`；密码错误返回 BAD_PASSWORD，被封禁返回 BANNED。密码永不外泄，Room 只有 has_password 标志。
+- JWT claims: `sub`(用户ID), `nick`, `game`(游戏标识), `iat`, `exp`；HS256，密钥为 JWT_SECRET。
+- 联调 token: 默认密钥下 `POST /api/v1/auth/dev-token`；自定义密钥后该接口关闭，需业务方签发。
+- 服务为内存态，重启清空；对局结果请由业务方持久化。
