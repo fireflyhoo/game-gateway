@@ -39,6 +39,18 @@ pub struct Connection {
     pub sender: mpsc::UnboundedSender<WsMessage>,
 }
 
+/// 房间权威状态快照：网关原样保存、不解释内容。
+/// 用途：房主权威型游戏在房主断线时，把最后快照交给新房主续跑。
+#[derive(Debug, Clone)]
+pub struct RoomSnapshot {
+    /// 不透明状态 blob，由游戏客户端自行定义结构
+    pub state: Value,
+    /// 写入者 identity（写入时必须是房主）
+    pub owner: PlayerId,
+    /// 写入时间戳（毫秒）
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -47,6 +59,8 @@ pub struct AppState {
     pub connections: Arc<DashMap<String, Connection>>,
     /// 开发/测试用：预签发的 token 集合（可选，见 auth.rs）
     pub dev_tokens: Arc<DashMap<String, String>>,
+    /// key = 房间 id，value = 房主提交的最新状态快照（网关不解释内容）
+    pub snapshots: Arc<DashMap<RoomId, RoomSnapshot>>,
 }
 
 impl AppState {
@@ -56,7 +70,39 @@ impl AppState {
             rooms: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
             dev_tokens: Arc::new(DashMap::new()),
+            snapshots: Arc::new(DashMap::new()),
         }
+    }
+
+    /// 保存房间快照（仅房主可写）。返回是否写入成功。
+    pub fn save_snapshot(&self, room_id: &str, owner: &str, state: Value) -> bool {
+        let is_host = self
+            .rooms
+            .get(room_id)
+            .map(|r| r.value().host == owner)
+            .unwrap_or(false);
+        if !is_host {
+            return false;
+        }
+        self.snapshots.insert(
+            room_id.to_string(),
+            RoomSnapshot {
+                state,
+                owner: owner.to_string(),
+                updated_at_ms: Utc::now().timestamp_millis(),
+            },
+        );
+        true
+    }
+
+    /// 取出房间快照的克隆（用于断线移交）
+    pub fn take_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+        self.snapshots.get(room_id).map(|s| s.value().clone())
+    }
+
+    /// 清理房间快照（房间解散 / 对局结束时调用）
+    pub fn clear_snapshot(&self, room_id: &str) {
+        self.snapshots.remove(room_id);
     }
 
     pub fn issue_token(&self, token: String, identity: String) {
@@ -201,6 +247,7 @@ impl AppState {
         if room.seats.is_empty() {
             drop(room);
             self.rooms.remove(room_id);
+            self.clear_snapshot(room_id);
             return Some((None, true));
         }
 

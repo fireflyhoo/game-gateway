@@ -448,6 +448,8 @@ async fn dispatch(
                 return reply("error", json!({ "code": "NOT_HOST", "message": "仅房主可操作" }));
             }
             let new_state = if msg.t == "room_start" {
+                // 新一局：清掉上一局残留的状态快照
+                state.clear_snapshot(&room_id);
                 RoomState::Playing
             } else {
                 RoomState::Finished
@@ -533,6 +535,25 @@ async fn dispatch(
             return None;
         }
 
+        // ★ 房主提交权威状态快照：网关原样保管，不解释内容。
+        // 用途：房主断线时把最后快照通过 state_takeover 交给新房主续跑。
+        "state_save" => {
+            let room_id = match conn_room(state, conn_id) {
+                Some(id) => id,
+                None => return reply("error", json!({ "code": "NOT_IN_ROOM", "message": "不在房间中" })),
+            };
+            let state_value = payload.get("state").cloned().unwrap_or(json!({}));
+            // 限制 blob 体积，防止滥用（约 512KB）
+            let approx = serde_json::to_string(&state_value).map(|s| s.len()).unwrap_or(0);
+            if approx > 512 * 1024 {
+                return reply("error", json!({ "code": "SNAPSHOT_TOO_LARGE", "message": "状态快照超过 512KB" }));
+            }
+            if !state.save_snapshot(&room_id, identity, state_value) {
+                return reply("error", json!({ "code": "NOT_HOST", "message": "仅房主可提交状态快照" }));
+            }
+            return reply("state_saved", json!({ "room": room_id, "bytes": approx }));
+        }
+
         // 强制离开房间（由 REST 解散房间时推过来）
         "force_leave_room" => {
             clear_conn_room(state, conn_id);
@@ -561,11 +582,25 @@ async fn on_disconnect(
 
     // 只有该身份没有任何连接了，才真正从房间移除席位
     if state.connection_count(identity) == 0 {
+        // ★ 在 leave_all_rooms 之前先记录：断线者是否为房主、以及该房间的快照。
+        // 因为 leave_all_rooms 内部会移交 host 并可能清空快照，之后就判断不出来了。
+        let was_host_rooms: std::collections::HashSet<crate::models::RoomId> = state
+            .rooms
+            .iter()
+            .filter(|r| r.value().host == identity)
+            .map(|r| r.value().id.clone())
+            .collect();
+        let pending_snapshots: std::collections::HashMap<crate::models::RoomId, crate::state::RoomSnapshot> =
+            was_host_rooms
+                .iter()
+                .filter_map(|rid| state.take_snapshot(rid).map(|s| (rid.clone(), s)))
+                .collect();
+
         let affected = state.leave_all_rooms(identity);
         for room_id in affected {
             if let Some(room) = state.rooms.get(&room_id) {
                 let mut room = room.value().clone();
-                // 标记离线；若房主断开则移交
+                // 标记离线（leave_all_rooms 已移除席位并移交 host，这里 retain 兜底）
                 let mut disconnected_seat: Option<Seat> = None;
                 room.seats.retain(|s| {
                     if s.identity == identity {
@@ -579,13 +614,8 @@ async fn on_disconnect(
                 if room.seats.is_empty() {
                     drop(room);
                     state.rooms.remove(&room_id);
+                    state.clear_snapshot(&room_id);
                 } else {
-                    if room.host == identity {
-                        room.host = room.seats[0].identity.clone();
-                        for (i, s) in room.seats.iter_mut().enumerate() {
-                            s.is_host = i == 0;
-                        }
-                    }
                     let update = ServerMessage::new(
                         "room_update",
                         json!({
@@ -596,6 +626,31 @@ async fn on_disconnect(
                     )
                     .to_text();
                     state.broadcast_room(&room, &update, None);
+
+                    // ★ 断线者原为房主且存在状态快照时，把快照交给新房主续跑对局。
+                    // 网关不解释 blob 内容，只做保管与转交。
+                    if was_host_rooms.contains(&room_id) {
+                        if let Some(snap) = pending_snapshots.get(&room_id) {
+                            let takeover = ServerMessage::new(
+                                "state_takeover",
+                                json!({
+                                    "room": room_id,
+                                    "new_host": room.host,
+                                    "from": identity,
+                                    "owner": snap.owner,
+                                    "state": snap.state,
+                                    "updated_at_ms": snap.updated_at_ms,
+                                }),
+                            )
+                            .to_text();
+                            let delivered = state.send_to_identity(&room.host, &takeover);
+                            state.clear_snapshot(&room_id);
+                            info!(
+                                room = %room_id, new_host = %room.host,
+                                delivered, "state snapshot handed over to new host"
+                            );
+                        }
+                    }
                 }
             }
         }

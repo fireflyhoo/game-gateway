@@ -160,6 +160,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/dev-token \
 | `room_start` | `{}` | 房主开局 |
 | `room_finish` | `{}` | 房主结束 |
 | `game` | `{event, data, to?}` | **游戏事件透传**；有 `to` 则私发，否则广播给房间其他人 |
+| `state_save` | `{state: <不透明快照>}` | **房主**提交权威状态快照（≤512KB），回 `state_saved`；供断线接管 |
 | `chat` | `{text}` | 房间聊天（不在房间则大厅广播） |
 
 ### 服务端 → 客户端
@@ -176,6 +177,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/dev-token \
 | `room_update` | `{room, reason, seat?}` | ready / 离线等状态变更 |
 | `room_state` | `{room, state}` | 开局 / 结束 |
 | `game` | `{from, nick, event, data, room, ts}` | 收到游戏事件 |
+| `state_saved` | `{room, bytes}` | `state_save` 成功回执 |
+| `state_takeover` | `{room, new_host, from, owner, state, updated_at_ms}` | 房主断线且有快照时，推给新房主 |
 | `chat` | `{from, nick, text, room, ts}` | 收到聊天 |
 | `sent` | `{to, delivered}` | 私发回执 |
 | `left` | `{}` | `room_leave` 的直接响应 |
@@ -246,6 +249,7 @@ AI 客户端 ─ GET / , /ai/* ─ 自描述文档（编译期嵌入）
 - **多实例横向扩展**：当前房间/连接是进程内 DashMap。要上多台机器，把 `RoomRegistry` 和 `ConnectionPool` 换成 Redis（房间态用 Hash，跨节点广播用 Pub/Sub），并在前面挂负载均衡 + sticky session 或纯 Pub/Sub 广播。接口已收敛在 `state.rs`，替换点集中。
 - **WSS**：生产用 Nginx/Caddy 反代终止 TLS，后端只跑纯 WS。反代时透传 `X-Forwarded-Proto/Host`，自描述文档会据此生成正确的绝对地址。
 - **对局状态持久化**：本服务是**通道**，不存对局结果。结算由业务服务落库。
+- **房主权威与断线接管**：若游戏采用「房主跑唯一模拟、其他人只收状态」的架构，房主可用 `state_save` 定期把世界快照（网关不解释的不透明 blob）交给网关保管；房主断线移交时，网关把最后快照以 `state_takeover` 推给新房主，对方据此恢复世界续跑，避免整局中止。`room_start` 会清空旧快照，房间解散也会清理。快照上限约 512KB，仅房主可写。
 - **观战 / 回放**：可基于 `game` 事件在客户端录制，或另接消息队列持久化。
 
 ---

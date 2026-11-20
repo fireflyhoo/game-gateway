@@ -192,7 +192,16 @@
         },
         "example": { "event": "move", "data": { "row": 1, "col": 2 } }
       },
-      { "t": "chat", "desc": "房间聊天；不在房间则广播给同 game 所有连接。", "payload": { "text": "string" } }
+      { "t": "chat", "desc": "房间聊天；不在房间则广播给同 game 所有连接。", "payload": { "text": "string" } },
+      {
+        "t": "state_save",
+        "desc": "★房主专用★ 提交房间权威状态快照。网关原样保管、不解释内容（约 512KB 上限）。房主断线移交时，网关把最后快照通过 state_takeover 发给新房主，供房主权威型游戏续跑。room_start 会清空旧快照。成功回 state_saved(带 rid)。",
+        "payload": {
+          "state": { "type": "any", "required": true, "desc": "不透明状态 blob，业务自行定义结构" }
+        },
+        "requires_host": true,
+        "example": { "state": { "tick": 42, "players": [] } }
+      }
     ],
     "server_messages": [
       { "t": "welcome", "when": "建连成功", "payload": { "identity": "string", "nick": "string", "game": "string", "conn": "string (连接 id)", "rooms": "Room[]" } },
@@ -208,6 +217,8 @@
       { "t": "room_state", "when": "开局/结束", "payload": { "room": "Room", "state": "waiting|playing|finished" } },
       { "t": "game", "when": "收到 game 事件", "payload": { "from": "string", "nick": "string", "event": "string", "data": "any", "room": "string", "ts": "RFC3339 string" } },
       { "t": "chat", "when": "收到聊天", "payload": { "from": "string", "nick": "string", "text": "string", "room": "string?", "ts": "RFC3339 string" } },
+      { "t": "state_saved", "when": "state_save 成功（带 rid）", "payload": { "room": "string", "bytes": "number (近似字节数)" } },
+      { "t": "state_takeover", "when": "房主断线且存在状态快照时，推给新房主", "payload": { "room": "string", "new_host": "string (新房主 identity)", "from": "string (断线房主 identity)", "state": "any (原样快照)", "updated_at_ms": "number" } },
       { "t": "kicked", "when": "被房主踢出房间", "payload": { "room": "string", "by": "string", "reason": "string" } },
       { "t": "banned", "when": "被房主封禁", "payload": { "room": "string", "by": "string", "reason": "string" } },
       { "t": "unbanned", "when": "封禁被解除", "payload": { "room": "string", "by": "string" } },
