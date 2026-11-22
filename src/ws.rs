@@ -280,6 +280,15 @@ async fn dispatch(
                     .to_text();
                     state.broadcast_room(&room, &joined_msg, Some(identity));
 
+                    // ★ 广播完整房间状态：房内所有人（包括对局中的房主）据此刷新座位表。
+                    //   对局中房主需要拿到新座位，才能把中途加入者纳入权威世界并同步快照。
+                    let room_update = ServerMessage::new(
+                        "room_update",
+                        json!({ "room": room, "reason": "peer_joined" }),
+                    )
+                    .to_text();
+                    state.broadcast_room(&room, &room_update, None);
+
                     let _ = tx.send(Message::Text(
                         ServerMessage::new("room_joined", json!({ "room": room })).to_text().into(),
                     ));

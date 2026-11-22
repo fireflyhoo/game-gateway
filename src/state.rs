@@ -182,7 +182,7 @@ impl AppState {
     }
 
     /// 加入房间，返回加入后的房间快照。
-    /// 满员/已结束/游戏中/被封禁/密码错误 都会拒绝。
+    /// 满员/被封禁/密码错误 都会拒绝；准备中/对局中/结算后均可加入。
     /// 已在房间内（幂等重连）跳过密码校验，但仍受封禁检查约束。
     pub fn join_room(
         &self,
@@ -207,9 +207,12 @@ impl AppState {
             return Ok(room.clone());
         }
 
-        // 3. 状态检查
-        if room.state != RoomState::Waiting {
-            return Err(AppError::Conflict("房间已开始或已结束，无法加入".to_string()));
+        // 3. 状态检查：准备中/对局中/结算后都允许加入。
+        //    ★ 以前只允许 Waiting，导致一局开始后（playing）或结算态（finished）
+        //    后进玩家永远进不来；对局中途加入由游戏客户端用房主快照同步。
+        //    仅保留封禁/密码/满员限制。
+        match room.state {
+            RoomState::Waiting | RoomState::Playing | RoomState::Finished => {}
         }
 
         // 4. 密码检查

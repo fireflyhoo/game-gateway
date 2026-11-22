@@ -1,0 +1,837 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "spec": "game-gateway-ai-manifest/1.0",
+  "generated_for_ai": true,
+  "description": "机器可读的服务能力清单。AI 客户端读取本文件即可学会如何接入，无需人类提供额外文档。所有 {{BASE_URL}} 占位符已在响应中替换为实际地址。",
+  "service": {
+    "name": "game-gateway",
+    "version": "0.1.0",
+    "purpose": "Web 联机游戏通用后端。提供 REST 管理接口与 WebSocket 实时通道。服务端不解释游戏玩法，只负责房间/连接管理与事件透传。",
+    "base_url": "{{BASE_URL}}",
+    "transport": {
+      "rest": "HTTP/1.1 JSON",
+      "websocket": "RFC6455, text frames carrying JSON"
+    },
+    "key_principles": [
+      "一套后端服务多个游戏：JWT 的 game 字段做逻辑隔离，跨 game 无法互相加入房间。",
+      "玩法无关：游戏事件用 WS 的 'game' 消息透传，data 原样转发，服务端不解析。",
+      "内存态：房间与连接存于进程内，服务重启即清空；对局结果由业务方自行持久化。",
+      "鉴权外置：JWT 由业务方用同一 JWT_SECRET 签发；仅默认密钥时开放 dev-token 联调接口。"
+    ]
+  },
+  "discovery": {
+    "note": "本服务自描述。按下列端点可获取全部信息。",
+    "endpoints": [
+      {
+        "path": "/",
+        "format": "application/json",
+        "desc": "根发现文档，列出所有自描述资源"
+      },
+      {
+        "path": "/api/v1/info",
+        "format": "application/json",
+        "desc": "服务状态与实际限制，含 discovery 指针"
+      },
+      {
+        "path": "/llms.txt",
+        "format": "text/plain",
+        "desc": "llmstxt.org 约定的 AI 入口清单"
+      },
+      {
+        "path": "/ai/manifest.json",
+        "format": "application/json",
+        "desc": "本文件：完整机器可读能力清单"
+      },
+      {
+        "path": "/ai/openapi.json",
+        "format": "application/json",
+        "desc": "OpenAPI 3.1 规范（REST 部分）"
+      },
+      {
+        "path": "/ai/capabilities",
+        "format": "application/json",
+        "desc": "当前运行实例的实际配置与开关状态"
+      },
+      {
+        "path": "/ai/guide",
+        "format": "text/markdown",
+        "desc": "完整接入指南与代码示例"
+      }
+    ]
+  },
+  "authentication": {
+    "schemes": [
+      {
+        "name": "bearer",
+        "where": "REST: Authorization: Bearer <token> ；WS: ?token=<token>（浏览器 WS 不能自定义 Header，故走 query）",
+        "algorithm": "HS256",
+        "secret_env": "JWT_SECRET",
+        "token_issue": "由业务方登录服务签发；联调期可用 POST /api/v1/auth/dev-token（默认密钥时）"
+      }
+    ],
+    "jwt_claims": {
+      "sub": {
+        "type": "string",
+        "required": true,
+        "desc": "用户唯一 ID，房间席位按此去重"
+      },
+      "nick": {
+        "type": "string",
+        "required": false,
+        "default": "",
+        "desc": "展示昵称"
+      },
+      "game": {
+        "type": "string",
+        "required": false,
+        "default": "default",
+        "desc": "游戏标识，用于多游戏隔离"
+      },
+      "iat": {
+        "type": "integer",
+        "required": true,
+        "desc": "签发时间 Unix 秒"
+      },
+      "exp": {
+        "type": "integer",
+        "required": true,
+        "desc": "过期时间 Unix 秒，校验允许 5 秒偏差"
+      }
+    },
+    "rules": [
+      "创建房间时 body.game 必须与 token 的 game 一致，否则 400。",
+      "加入房间时房间的 game 必须与连接 token 的 game 一致，否则返回 WS error GAME_MISMATCH。",
+      "同一身份默认最多 4 个并发 WS 连接（MAX_CONNECTIONS_PER_IDENTITY）。"
+    ]
+  },
+  "rest": {
+    "base_path": "/api/v1",
+    "note": "所有响应成功时含 \"ok\": true；失败时 HTTP 状态码非 2xx，body 为 {ok:false, error:{code,message}}。",
+    "endpoints": [
+      {
+        "name": "health",
+        "method": "GET",
+        "path": "/health",
+        "auth": false,
+        "desc": "健康检查，返回值含 status=healthy 与当前时间。",
+        "response": {
+          "ok": true,
+          "status": "healthy",
+          "time": "RFC3339 string"
+        }
+      },
+      {
+        "name": "info",
+        "method": "GET",
+        "path": "/api/v1/info",
+        "auth": false,
+        "desc": "服务信息、在线统计与自描述发现指针。AI 应首先访问此端点。",
+        "response": {
+          "ok": true,
+          "service": "game-gateway",
+          "version": "string",
+          "stats": {
+            "rooms": "number",
+            "connections": "number",
+            "online_identities": "number"
+          },
+          "limits": {
+            "max_players_default": "number",
+            "ws_idle_timeout_secs": "number"
+          },
+          "discovery": {
+            "docs": "array of {path,format,desc}"
+          }
+        }
+      },
+      {
+        "name": "dev_token",
+        "method": "POST",
+        "path": "/api/v1/auth/dev-token",
+        "auth": false,
+        "conditional": "仅当 JWT_SECRET 为默认值时启用；自定义密钥后返回 403 DEV_TOKEN_DISABLED",
+        "desc": "联调用：按 identity/nick/game 签发 token。生产应由业务方签发。",
+        "request_body": {
+          "identity": {
+            "type": "string",
+            "required": true,
+            "desc": "用户唯一 ID"
+          },
+          "nick": {
+            "type": "string",
+            "required": false,
+            "default": ""
+          },
+          "game": {
+            "type": "string",
+            "required": false,
+            "default": "default"
+          }
+        },
+        "example_request": {
+          "identity": "p1",
+          "nick": "Alice",
+          "game": "chess"
+        },
+        "response": {
+          "ok": true,
+          "token": "string",
+          "token_type": "Bearer",
+          "expires_in": "number",
+          "identity": "string",
+          "game": "string"
+        }
+      },
+      {
+        "name": "list_rooms",
+        "method": "GET",
+        "path": "/api/v1/rooms",
+        "auth": false,
+        "desc": "列出房间。默认全部；可按 game 与 visibility 过滤。",
+        "query": {
+          "game": {
+            "type": "string",
+            "required": false
+          },
+          "visibility": {
+            "type": "string",
+            "required": false,
+            "enum": [
+              "public",
+              "private"
+            ]
+          }
+        },
+        "response": {
+          "ok": true,
+          "rooms": "Room[]",
+          "count": "number"
+        }
+      },
+      {
+        "name": "create_room",
+        "method": "POST",
+        "path": "/api/v1/rooms",
+        "auth": true,
+        "desc": "创建房间，创建者成为房主并占一个席位（此时 connected=false，连接后自动置 true）。",
+        "request_body": {
+          "name": {
+            "type": "string",
+            "required": true,
+            "constraint": "1~64 字符"
+          },
+          "game": {
+            "type": "string",
+            "required": false,
+            "default": "default",
+            "constraint": "1~64 字符，必须等于 token.game"
+          },
+          "visibility": {
+            "type": "string",
+            "required": false,
+            "default": "public",
+            "enum": [
+              "public",
+              "private"
+            ]
+          },
+          "max_players": {
+            "type": "integer",
+            "required": false,
+            "default": 8,
+            "constraint": "clamp 到 2~64"
+          },
+          "metadata": {
+            "type": "object",
+            "required": false,
+            "default": {},
+            "desc": "业务自定义数据，原样保存与返回"
+          },
+          "password": {
+            "type": "string",
+            "required": false,
+            "desc": "加入密码（可选）。仅服务端存 SHA-256 加盐哈希；房间返回体只含 has_password=true，绝不泄露密码或哈希"
+          }
+        },
+        "example_request": {
+          "name": "新手房",
+          "game": "chess",
+          "visibility": "public",
+          "max_players": 2,
+          "metadata": {
+            "map": "desert"
+          },
+          "password": "1234"
+        },
+        "response": {
+          "ok": true,
+          "room": "Room"
+        },
+        "errors": [
+          "400 房间名/game 非法或 game 不一致",
+          "401 token 无效"
+        ]
+      },
+      {
+        "name": "get_room",
+        "method": "GET",
+        "path": "/api/v1/rooms/{room_id}",
+        "auth": false,
+        "path_params": {
+          "room_id": {
+            "type": "string",
+            "desc": "房间 UUID"
+          }
+        },
+        "desc": "查询房间详情。",
+        "response": {
+          "ok": true,
+          "room": "Room"
+        },
+        "errors": [
+          "404 房间不存在"
+        ]
+      },
+      {
+        "name": "delete_room",
+        "method": "DELETE",
+        "path": "/api/v1/rooms/{room_id}",
+        "auth": true,
+        "desc": "解散房间，仅房主可用。会向房内广播 room_dissolved 与 force_leave_room。",
+        "path_params": {
+          "room_id": {
+            "type": "string"
+          }
+        },
+        "response": {
+          "ok": true,
+          "dissolved": "string (room_id)"
+        },
+        "errors": [
+          "404 房间不存在",
+          "409 非房主"
+        ]
+      },
+      {
+        "name": "list_players",
+        "method": "GET",
+        "path": "/api/v1/players",
+        "auth": false,
+        "desc": "在线玩家（去重后的 identity -> nick 映射），可按 game 过滤。",
+        "query": {
+          "game": {
+            "type": "string",
+            "required": false
+          }
+        },
+        "response": {
+          "ok": true,
+          "players": {
+            "identity": "nick"
+          },
+          "count": "number"
+        }
+      }
+    ]
+  },
+  "websocket": {
+    "endpoint": "/ws?token=<JWT>",
+    "note": "建连后服务端先发 welcome，并向同 game 全部连接广播 room_list。空闲超时会收到 error(IDLE_TIMEOUT) 后断开。服务端主动发 RFC6455 Ping，客户端应回 Pong。",
+    "envelope": {
+      "client_to_server": {
+        "t": "string (消息类型)",
+        "payload": "object (默认 {})",
+        "rid": "string? (请求 id，响应原样带回)"
+      },
+      "server_to_client": {
+        "t": "string",
+        "payload": "object",
+        "rid": "string? (仅当客户端请求带 rid 时)"
+      }
+    },
+    "client_messages": [
+      {
+        "t": "ping",
+        "desc": "应用层心跳，回 pong。",
+        "payload": {}
+      },
+      {
+        "t": "room_list",
+        "desc": "请求房间列表，回 room_list。",
+        "payload": {}
+      },
+      {
+        "t": "players",
+        "desc": "请求在线玩家，回 players。",
+        "payload": {}
+      },
+      {
+        "t": "room_create",
+        "desc": "创建并自动加入房间。服务端依次发 room_joined、room_created、room_list。",
+        "payload": {
+          "name": "string",
+          "max_players": "number?",
+          "visibility": "public|private?",
+          "metadata": "object?",
+          "password": "string? (加入密码，可选)"
+        }
+      },
+      {
+        "t": "room_join",
+        "desc": "加入房间；若已在其它房间，成功后再离开。设了密码的房间必须带正确 password。被封禁者拒绝。准备中/对局中/结算后均可加入（中途加入由客户端用房间快照同步）。成功还会向房内广播 room_update 带完整房间状态。成功依次发 peer_joined(给房内其他人)、room_joined(给自己)、joined(带 rid)。失败返回 error(BAD_PASSWORD/BANNED/JOIN_CONFLICT/NO_ROOM)。",
+        "payload": {
+          "room": "string (room_id)",
+          "password": "string? (房间设密码时必填)"
+        }
+      },
+      {
+        "t": "room_leave",
+        "desc": "离开当前房间，移除席位，房主离开则移交，空房解散。回 left(带 rid)。",
+        "payload": {}
+      },
+      {
+        "t": "room_kick",
+        "desc": "★房主专用★ 把 target 踢出房间。被踢者收 kicked 并失去该房间广播；可重新加入。成功回 kicked_ok(带 rid)。",
+        "payload": {
+          "target": "string (identity)",
+          "room": "string? (目标房间 id；省略则用当前所在房间。REST 建房的房主需显式提供)",
+          "reason": "string? (默认 kicked)"
+        },
+        "requires_host": true
+      },
+      {
+        "t": "room_ban",
+        "desc": "★房主专用★ 封禁 target：踢出房间并加入封禁列表，无法再加入直到解封。被封禁者收 banned；房内其他人收 peer_banned。成功回 banned_ok(带 rid)。",
+        "payload": {
+          "target": "string (identity)",
+          "room": "string? (同上，可省略)",
+          "reason": "string? (默认 banned)"
+        },
+        "requires_host": true
+      },
+      {
+        "t": "room_unban",
+        "desc": "★房主专用★ 解除对 target 的封禁，之后其可重新加入。房内其他人收 peer_unbanned，被解封者收 unbanned。成功回 unbanned_ok(带 rid)。",
+        "payload": {
+          "target": "string (identity)",
+          "room": "string? (同上，可省略)"
+        },
+        "requires_host": true
+      },
+      {
+        "t": "ready",
+        "desc": "设置准备状态，向房内广播 room_update(reason=ready)。",
+        "payload": {
+          "value": "boolean (默认 true)"
+        }
+      },
+      {
+        "t": "room_start",
+        "desc": "房主开局，房间状态转 playing，广播 room_state。",
+        "payload": {},
+        "requires_host": true
+      },
+      {
+        "t": "room_finish",
+        "desc": "房主结束，房间状态转 finished，广播 room_state。",
+        "payload": {},
+        "requires_host": true
+      },
+      {
+        "t": "game",
+        "desc": "★核心★ 游戏事件透传。data 原样转发，服务端不解析。带 to 则私发给指定 identity，否则广播给房间其他人（排除发送者）。私发回 sent(带 rid)。",
+        "payload": {
+          "event": {
+            "type": "string",
+            "required": true,
+            "desc": "业务自定义事件名，如 move/sync_state"
+          },
+          "data": {
+            "type": "any",
+            "required": false,
+            "default": {},
+            "desc": "业务自定义数据，原样透传"
+          },
+          "to": {
+            "type": "string",
+            "required": false,
+            "desc": "目标 identity；有此字段则私发"
+          }
+        },
+        "example": {
+          "event": "move",
+          "data": {
+            "row": 1,
+            "col": 2
+          }
+        }
+      },
+      {
+        "t": "chat",
+        "desc": "房间聊天；不在房间则广播给同 game 所有连接。",
+        "payload": {
+          "text": "string"
+        }
+      },
+      {
+        "t": "state_save",
+        "desc": "★房主专用★ 提交房间权威状态快照。网关原样保管、不解释内容（约 512KB 上限）。房主断线移交时，网关把最后快照通过 state_takeover 发给新房主，供房主权威型游戏续跑。room_start 会清空旧快照。成功回 state_saved(带 rid)。",
+        "payload": {
+          "state": {
+            "type": "any",
+            "required": true,
+            "desc": "不透明状态 blob，业务自行定义结构"
+          }
+        },
+        "requires_host": true,
+        "example": {
+          "state": {
+            "tick": 42,
+            "players": []
+          }
+        }
+      }
+    ],
+    "server_messages": [
+      {
+        "t": "welcome",
+        "when": "建连成功",
+        "payload": {
+          "identity": "string",
+          "nick": "string",
+          "game": "string",
+          "conn": "string (连接 id)",
+          "rooms": "Room[]"
+        }
+      },
+      {
+        "t": "pong",
+        "when": "收到 ping",
+        "payload": {
+          "ts": "number (毫秒时间戳)"
+        }
+      },
+      {
+        "t": "room_list",
+        "when": "建连 / 房间变更 / 请求后",
+        "payload": {
+          "rooms": "Room[]"
+        }
+      },
+      {
+        "t": "players",
+        "when": "请求后",
+        "payload": {
+          "players": "{identity:nick}"
+        }
+      },
+      {
+        "t": "room_created",
+        "when": "room_create 后",
+        "payload": {
+          "room": "Room"
+        }
+      },
+      {
+        "t": "room_joined",
+        "when": "创建或加入房间后（给自己）",
+        "payload": {
+          "room": "Room"
+        }
+      },
+      {
+        "t": "joined",
+        "when": "room_join 的直接响应（带 rid）",
+        "payload": {
+          "room": "Room"
+        }
+      },
+      {
+        "t": "peer_joined",
+        "when": "他人加入房间（给房内其他人）",
+        "payload": {
+          "room": "string",
+          "seat": "Seat"
+        }
+      },
+      {
+        "t": "peer_left",
+        "when": "他人离开房间",
+        "payload": {
+          "room": "string",
+          "identity": "string",
+          "room_state": "Room?"
+        }
+      },
+      {
+        "t": "room_update",
+        "when": "ready/离线/解散等席位变更",
+        "payload": {
+          "room": "Room",
+          "reason": "ready|peer_left|dissolved",
+          "seat": "Seat?"
+        }
+      },
+      {
+        "t": "room_state",
+        "when": "开局/结束",
+        "payload": {
+          "room": "Room",
+          "state": "waiting|playing|finished"
+        }
+      },
+      {
+        "t": "game",
+        "when": "收到 game 事件",
+        "payload": {
+          "from": "string",
+          "nick": "string",
+          "event": "string",
+          "data": "any",
+          "room": "string",
+          "ts": "RFC3339 string"
+        }
+      },
+      {
+        "t": "chat",
+        "when": "收到聊天",
+        "payload": {
+          "from": "string",
+          "nick": "string",
+          "text": "string",
+          "room": "string?",
+          "ts": "RFC3339 string"
+        }
+      },
+      {
+        "t": "state_saved",
+        "when": "state_save 成功（带 rid）",
+        "payload": {
+          "room": "string",
+          "bytes": "number (近似字节数)"
+        }
+      },
+      {
+        "t": "state_takeover",
+        "when": "房主断线且存在状态快照时，推给新房主",
+        "payload": {
+          "room": "string",
+          "new_host": "string (新房主 identity)",
+          "from": "string (断线房主 identity)",
+          "state": "any (原样快照)",
+          "updated_at_ms": "number"
+        }
+      },
+      {
+        "t": "kicked",
+        "when": "被房主踢出房间",
+        "payload": {
+          "room": "string",
+          "by": "string",
+          "reason": "string"
+        }
+      },
+      {
+        "t": "banned",
+        "when": "被房主封禁",
+        "payload": {
+          "room": "string",
+          "by": "string",
+          "reason": "string"
+        }
+      },
+      {
+        "t": "unbanned",
+        "when": "封禁被解除",
+        "payload": {
+          "room": "string",
+          "by": "string"
+        }
+      },
+      {
+        "t": "peer_kicked",
+        "when": "房内其他人被踢",
+        "payload": {
+          "room": "string",
+          "target": "string",
+          "by": "string",
+          "room_state": "Room"
+        }
+      },
+      {
+        "t": "peer_banned",
+        "when": "房内其他人被封禁",
+        "payload": {
+          "room": "string",
+          "target": "string",
+          "by": "string",
+          "room_state": "Room"
+        }
+      },
+      {
+        "t": "peer_unbanned",
+        "when": "某人被解封",
+        "payload": {
+          "room": "string",
+          "target": "string",
+          "by": "string",
+          "room_state": "Room"
+        }
+      },
+      {
+        "t": "kicked_ok",
+        "when": "room_kick 成功回执（带 rid）",
+        "payload": {
+          "target": "string",
+          "room": "string"
+        }
+      },
+      {
+        "t": "banned_ok",
+        "when": "room_ban 成功回执（带 rid）",
+        "payload": {
+          "target": "string",
+          "room": "string"
+        }
+      },
+      {
+        "t": "unbanned_ok",
+        "when": "room_unban 成功回执（带 rid）",
+        "payload": {
+          "target": "string",
+          "room": "string"
+        }
+      },
+      {
+        "t": "sent",
+        "when": "私发 game 事件的回执（带 rid）",
+        "payload": {
+          "to": "string",
+          "delivered": "number"
+        }
+      },
+      {
+        "t": "left",
+        "when": "room_leave 的直接响应（带 rid）",
+        "payload": {}
+      },
+      {
+        "t": "room_dissolved",
+        "when": "房主通过 REST 解散房间",
+        "payload": {
+          "room": "string",
+          "by": "string"
+        }
+      },
+      {
+        "t": "force_leave_room",
+        "when": "房间被解散，要求客户端清本地状态",
+        "payload": {
+          "room": "string"
+        }
+      },
+      {
+        "t": "error",
+        "when": "各类错误",
+        "payload": {
+          "code": "string",
+          "message": "string"
+        }
+      }
+    ]
+  },
+  "models": {
+    "Claims": {
+      "sub": "string",
+      "nick": "string",
+      "game": "string",
+      "iat": "integer",
+      "exp": "integer"
+    },
+    "Room": {
+      "id": "string (uuid)",
+      "game": "string",
+      "name": "string",
+      "visibility": "RoomVisibility",
+      "state": "RoomState",
+      "max_players": "integer",
+      "host": "string (identity)",
+      "metadata": "object",
+      "seats": "Seat[]",
+      "created_at": "RFC3339 string",
+      "has_password": "boolean (是否设了加入密码；客户端据此提示输入密码)",
+      "password_hash": "不序列化 (服务端内部 SHA-256 加盐哈希，绝不外泄)",
+      "banned": "不序列化 (封禁 identity 列表，绝不外泄)"
+    },
+    "Seat": {
+      "identity": "string",
+      "nick": "string",
+      "ready": "boolean",
+      "is_host": "boolean",
+      "connected": "boolean"
+    },
+    "RoomVisibility": [
+      "public",
+      "private"
+    ],
+    "RoomState": [
+      "waiting",
+      "playing",
+      "finished"
+    ]
+  },
+  "errors": {
+    "http": {
+      "BAD_REQUEST": 400,
+      "UNAUTHORIZED": 401,
+      "FORBIDDEN / DEV_TOKEN_DISABLED": 403,
+      "NOT_FOUND": 404,
+      "CONFLICT": 409,
+      "INTERNAL": 500
+    },
+    "ws_payload_codes": [
+      "BAD_JSON",
+      "IDLE_TIMEOUT",
+      "BAD_NAME",
+      "MISSING_ROOM",
+      "NO_ROOM",
+      "GAME_MISMATCH",
+      "JOIN_FAILED",
+      "JOIN_CONFLICT",
+      "BAD_PASSWORD",
+      "BANNED",
+      "MISSING_TARGET",
+      "NOT_FOUND",
+      "NOT_HOST",
+      "BAD_REQUEST",
+      "MODERATION_FAILED",
+      "NOT_IN_ROOM",
+      "READY_FAILED",
+      "NO_EVENT",
+      "EMPTY",
+      "UNKNOWN_TYPE",
+      "MISSING_TOKEN"
+    ]
+  },
+  "typical_flow": [
+    "1. GET /api/v1/info 或 /ai/capabilities 了解实例状态与发现指针。",
+    "2. 取得 JWT：生产由业务服务签发；联调调 POST /api/v1/auth/dev-token。",
+    "3. WS 连接：new WebSocket(BASE + '/ws?token=' + token)，等待 welcome。",
+    "4. 建房：WS 发 room_create，或 REST POST /api/v1/rooms；两人用同一 room_id 发 room_join。",
+    "5. 就绪：各自发 ready {value:true}；房主发 room_start，全员收到 room_state=playing。",
+    "6. 对局：任意时刻发 game {event,data}，其他席位收到 game 消息并自行解释 data。",
+    "7. 管理：房主可发 room_kick {target} 踢人、room_ban {target} 封禁、room_unban {target} 解封；被踢/被封禁者立即失去房间广播并收到通知。",
+    "8. 结束：房主发 room_finish；结算数据由业务方落库，本服务不持久化对局结果。"
+  ],
+  "integration_notes": [
+    "浏览器 WS 不能设置自定义 Header，token 必须放 query。",
+    "rid 是可选的客户端请求 id，服务端在对应响应中原样带回，用于并发请求匹配；广播消息不带 rid。",
+    "心跳：服务端每 20s 发 Ping；客户端若 WS_IDLE_TIMEOUT_SECS 内无任何消息会被断开，建议定期发 {t:'ping'}。",
+    "横向扩展：进程内 DashMap 换成 Redis（房间 Hash + Pub/Sub 广播），切入点在 src/state.rs。",
+    "HTTPS/WSS：生产用 Nginx/Caddy 反代终止 TLS，后端只跑明文 HTTP/WS。",
+    "不要在文档或日志中泄露 JWT_SECRET 或用户 token。",
+    "房间密码仅以 SHA-256(room_id+password) 加盐哈希存储；Room JSON 只暴露 has_password 布尔值，密码与哈希、封禁列表都不会下发给任何客户端。",
+    "踢人/封禁/解封仅房主可用，服务端强制校验 room.host == token.sub；被踢者会立即从该房间的广播通道移除。",
+    "密码错误或封禁导致的加入失败不会影响玩家当前所在房间（先校验后切换）。"
+  ]
+}

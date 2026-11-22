@@ -151,7 +151,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/dev-token \
 | `room_list` | `{}` | 请求房间列表 |
 | `players` | `{}` | 请求在线玩家 |
 | `room_create` | `{name, max_players?, visibility?, metadata?}` | 创建并自动加入 |
-| `room_join` | `{room: "<room_id>", password?}` | 加入房间（加密房间需带 password） |
+| `room_join` | `{room: "<room_id>", password?}` | 加入房间（加密房间需带 password；准备中/对局中/结算后均可加入） |
 | `room_leave` | `{}` | 离开房间 |
 | `room_kick` | `{target: "<identity>", room?, reason?}` | **房主**踢人 |
 | `room_ban` | `{target: "<identity>", room?, reason?}` | **房主**封禁（不可再加入） |
