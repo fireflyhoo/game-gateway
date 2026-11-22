@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-token_server.py —— 为泡泡大乱斗签发 JWT（game=bubble）
+token_server.py —— 为联机游戏签发 JWT（与 game-gateway 共享 JWT_SECRET）
 
-- 读取 /opt/game-gateway/.env 中的 JWT_SECRET，与网关共享密钥
-- GET /token?nick=xxx&uid=xxx  ->  { token, nick, game, exp, identity }
+支持多游戏：GET /token?game=<key>&nick=xxx&uid=xxx -> { token, nick, game, exp, identity }
+- game=archery -> game="archery", identity 前缀 "ar_"
+- 缺省 / game=bubble -> game="bubble", identity 前缀 "bb_"（兼容泡泡大乱斗）
 - 纯标准库实现 HS256 JWT，无第三方依赖
 - 监听 127.0.0.1:8081，由 Caddy 反代到 api.coollf.com/token
 """
@@ -25,7 +26,9 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 ENV_PATH = "/opt/game-gateway/.env"
-GAME = "bubble"
+# game key -> identity 前缀；缺省走 bubble，保证旧客户端不变
+GAME_PREFIX = {"bubble": "bb_", "archery": "ar_"}
+ALLOWED_GAMES = set(GAME_PREFIX)
 TTL_SECS = 7200
 
 
@@ -58,7 +61,7 @@ def sign_jwt(claims: dict) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "BubbleToken/1.0"
+    server_version = "GameToken/1.0"
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -88,20 +91,24 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         nick = (qs.get("nick", [""])[0] or "").strip()
         uid = (qs.get("uid", [""])[0] or "").strip()
+        game = (qs.get("game", ["bubble"])[0] or "bubble").strip().lower()
+        if game not in ALLOWED_GAMES:
+            self._json({"error": "unknown game"}, 400)
+            return
         if not nick:
             self._json({"error": "missing nick"}, 400)
             return
         if len(nick) > 12:
             nick = nick[:12]
-        # 身份：优先用客户端持久 uid，否则随机
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
             uid = "u_" + secrets.token_hex(8)
-        identity = "bb_" + uid
+        prefix = GAME_PREFIX[game]
+        identity = prefix + uid
         now = int(time.time())
         claims = {
             "sub": identity,
             "nick": nick,
-            "game": GAME,
+            "game": game,
             "iat": now,
             "exp": now + TTL_SECS,
         }
@@ -110,12 +117,12 @@ class Handler(BaseHTTPRequestHandler):
             "token": token,
             "identity": identity,
             "nick": nick,
-            "game": GAME,
+            "game": game,
             "exp": now + TTL_SECS,
         })
 
     def log_message(self, fmt, *args):
-        pass  # 静默，交给 journald
+        pass
 
 
 if __name__ == "__main__":
